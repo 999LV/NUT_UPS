@@ -6,9 +6,10 @@ Author: Logread, adapted from the NUT utilities (see Network UPS Tools project a
 Version:    0.0.1: alpha
             0.0.2: beta, changed status device to Alert v.s. multilevel switch with alarm icon
             0.1.0: 1st stable version
+            0.1.1: small bux fix, edit incorrect some devices labels (AC v.s. DC)
 """
 """
-<plugin key="NUT_UPS" name="UPS Monitor" author="logread" version="0.1.0" wikilink="http://www.domoticz.com/wiki/plugins/NUT_UPS.html" externallink="http://networkupstools.org/">
+<plugin key="NUT_UPS" name="UPS Monitor" author="logread" version="0.1.1" wikilink="http://www.domoticz.com/wiki/plugins/NUT_UPS.html" externallink="http://networkupstools.org/">
     <params>
         <param field="Address" label="UPS NUT Server IP Address" width="200px" required="true" default="127.0.0.1"/>
         <param field="Port" label="Port" width="40px" required="true" default="3493"/>
@@ -37,10 +38,10 @@ class BasePlugin:
             # key:              [device label, unit, value, device number, used by default]
             "battery.charge":   ["UPS Charge",          "%", None,  2, 1],
             "battery.runtime":  ["UPS Backup Time",     "s", None,  3, 1],
-            "input.voltage":    ["UPS DC Input",        "V", None,  4, 0],
+            "input.voltage":    ["UPS AC Input",        "V", None,  4, 0],
             "ups.load":         ["UPS Load",            "%", None,  5, 0],
             "ups.realpower":    ["UPS Power",           "W", None,  6, 0],
-            "input.frequency":  ["UPS DC Frequency",   "Hz", None, 7, 0],
+            "input.frequency":  ["UPS AC Frequency",   "Hz", None, 7, 0],
             "ups.status":       ["UPS Status",          "",  0,     1, 1]
         }
         return
@@ -94,10 +95,8 @@ class BasePlugin:
                 nut.close()
                 for key in self.variables:
                     Domoticz.Debug("Variable {} = {}".format(self.variables[key][0], self.variables[key][2]))
-                    if self.variables[key][2] == None:  # our ups does not serve that variable... let's delete it
-                        del self.variables[key]
-                for key in self.variables:
-                    self.UpdateDevice(key)  # create/update the relevant child devices
+                    if self.variables[key][2] != None:  # skip any variables not reported by the NUT server
+                        self.UpdateDevice(key)  # create/update the relevant child devices
 
     def UpdateDevice(self, key):
         # inner function to perform the actual update
