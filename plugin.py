@@ -7,9 +7,12 @@ Version:    0.0.1: alpha
             0.0.2: beta, changed status device to Alert v.s. multilevel switch with alarm icon
             0.1.0: 1st stable version
             0.1.1: small bux fix, edit incorrect some devices labels (AC v.s. DC)
+            0.1.2: code change to avoid bug that appeared with domoticz version 3.8035
+                    (devices no longer can be created and updated in the same pass
+            0.1.3: code cleanup
 """
 """
-<plugin key="NUT_UPS" name="UPS Monitor" author="logread" version="0.1.1" wikilink="http://www.domoticz.com/wiki/plugins/NUT_UPS.html" externallink="http://networkupstools.org/">
+<plugin key="NUT_UPS" name="UPS Monitor" author="logread" version="0.1.3" wikilink="http://www.domoticz.com/wiki/plugins/NUT_UPS.html" externallink="http://networkupstools.org/">
     <params>
         <param field="Address" label="UPS NUT Server IP Address" width="200px" required="true" default="127.0.0.1"/>
         <param field="Port" label="Port" width="40px" required="true" default="3493"/>
@@ -35,14 +38,14 @@ class BasePlugin:
         self.nextpoll = datetime.now()
         self.pollinterval = 60  #Time in seconds between two polls
         self.variables = {
-            # key:              [device label, unit, value, device number, used by default]
+            # key:              [device label,         unit, value, device number, used by default]
+            "ups.status":       ["UPS Status",          "",  0,     1, 1],
             "battery.charge":   ["UPS Charge",          "%", None,  2, 1],
             "battery.runtime":  ["UPS Backup Time",     "s", None,  3, 1],
             "input.voltage":    ["UPS AC Input",        "V", None,  4, 0],
             "ups.load":         ["UPS Load",            "%", None,  5, 0],
             "ups.realpower":    ["UPS Power",           "W", None,  6, 0],
-            "input.frequency":  ["UPS AC Frequency",   "Hz", None, 7, 0],
-            "ups.status":       ["UPS Status",          "",  0,     1, 1]
+            "input.frequency":  ["UPS AC Frequency",   "Hz", None,  7, 0]
         }
         return
 
@@ -64,11 +67,6 @@ class BasePlugin:
         Domoticz.Debug("onStop called")
         Domoticz.Debugging(0)
 
-
-    def onCommand(self, Unit, Command, Level, Hue):
-        Domoticz.Debug(
-            "onCommand called for Unit " + str(Unit) + ": Parameter '" + str(Command) + "', Level: " + str(Level))
-
     def onHeartbeat(self):
         now = datetime.now()
         if now >= self.nextpoll:
@@ -76,8 +74,9 @@ class BasePlugin:
             # poll the NUT UPS server
             try:
                 nut = telnetlib.Telnet(host=Parameters["Address"], port=Parameters["Port"], timeout=5)
-            except:
-                Domoticz.Error("Cannot communicate with NAT Server at address {} / port {}".format(Parameters["Address"], port=Parameters["Port"]))
+            except Exception as errorcode:
+                Domoticz.Error("Cannot communicate with NAT Server at {}:{} due to {}".format(
+                    Parameters["Address"], Parameters["Port"], errorcode.args))
             else:
                 nut.write(bytes("LIST VAR {}\n".format(Parameters["Mode1"]), "utf-8"))
                 response = nut.read_until(b"\n").decode()
@@ -95,7 +94,7 @@ class BasePlugin:
                 nut.close()
                 for key in self.variables:
                     Domoticz.Debug("Variable {} = {}".format(self.variables[key][0], self.variables[key][2]))
-                    if self.variables[key][2] != None:  # skip any variables not reported by the NUT server
+                    if self.variables[key][2]:  # skip any variables not reported by the NUT server
                         self.UpdateDevice(key)  # create/update the relevant child devices
 
     def UpdateDevice(self, key):
@@ -103,8 +102,8 @@ class BasePlugin:
         def DoUpdate(Unit, nValue, sValue):
             try:
                 Devices[Unit].Update(nValue=nValue, sValue=sValue)
-            except:
-                Domoticz.Error("Failed to update device unit " + str(Unit))
+            except Exception as errorcode:
+                Domoticz.Error("Failed to update device unit {} due to {}".format(Unit, errorcode.args))
         # Make sure that the Domoticz device still exists (they can be deleted) before updating it
         if self.variables[key][3] in Devices:
             if key == "ups.status":
@@ -121,7 +120,7 @@ class BasePlugin:
             Domoticz.Device(Name=self.variables[key][0], Unit=self.variables[key][3], TypeName="Custom",
                             Image= 17, Options={"Custom": "1;{}".format(self.variables[key][1])},
                             Used=self.variables[key][4]).Create()
-            self.UpdateDevice(key)
+            #self.UpdateDevice(key) this no longer works with domoticz 3.8035... Update upon next poll
 
 global _plugin
 _plugin = BasePlugin()
@@ -133,10 +132,6 @@ def onStart():
 def onStop():
     global _plugin
     _plugin.onStop()
-
-def onCommand(Unit, Command, Level, Hue):
-    global _plugin
-    _plugin.onCommand(Unit, Command, Level, Hue)
 
 def onHeartbeat():
     global _plugin
