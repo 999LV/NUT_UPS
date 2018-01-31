@@ -10,9 +10,10 @@ Version:    0.0.1: alpha
             0.1.2: code change to avoid bug that appeared with domoticz version 3.8035
                     (devices no longer can be created and updated in the same pass
             0.1.3: code cleanup
+            0.2.0: added a more comprehensive list of NUT status variables. Thanks to domoticz forum use @ycahome
 """
 """
-<plugin key="NUT_UPS" name="UPS Monitor" author="logread" version="0.1.3" wikilink="http://www.domoticz.com/wiki/plugins/NUT_UPS.html" externallink="http://networkupstools.org/">
+<plugin key="NUT_UPS" name="UPS Monitor" author="logread" version="0.2.0" wikilink="http://www.domoticz.com/wiki/plugins/NUT_UPS.html" externallink="http://networkupstools.org/">
     <params>
         <param field="Address" label="UPS NUT Server IP Address" width="200px" required="true" default="127.0.0.1"/>
         <param field="Port" label="Port" width="40px" required="true" default="3493"/>
@@ -29,6 +30,7 @@ Version:    0.0.1: alpha
 import Domoticz
 import telnetlib
 from datetime import datetime, timedelta
+
 
 class BasePlugin:
 
@@ -47,7 +49,27 @@ class BasePlugin:
             "ups.realpower":    ["UPS Power",           "W", None,  6, 0],
             "input.frequency":  ["UPS AC Frequency",   "Hz", None,  7, 0]
         }
+        self.status = {
+            #code (display, alarm level)
+            "OL":       ("ONLINE",          1), # On line (mains is present)
+            "OB":       ("ONBATTERY",       4), # On battery (mains is not present)
+            "LB":       ("LOWBATTERY",      4), # Low battery
+            "HB":       ("HIGHBATTERY",     1), # High battery
+            "RB":       ("REPLACEBATTERY",  3), # The battery needs to be replaced
+            "CHRG":     ("CHARGING",        1), # The battery is charging
+            "DISCHRG":  ("DISCHARGING",     3), # The battery is discharging (inverter is providing load power)
+            "BYPASS":   ("BYPASS",          3), # UPS bypass circuit is active - no battery protection is available
+            "CAL":      ("CALLIBRATION",    1), # UPS is currently performing runtime calibration (on battery)
+            "OFF":      ("OFF",             0), # UPS is offline and is not supplying power to the load
+            "OVER":     ("OVERLOAD",        4), # UPS is overloaded
+            "TRIM":     ("SMARTTRIM",       3), # UPS is trimming incoming voltage (called "buck" in some hardware)
+            "BOOST":    ("BOOST",           3), # UPS is boosting incoming voltage
+            "FSD":      ("FORCE_SHUTDOWN",  4)  # Forced Shutdown
+        }
+        self.statusflags = []
+        self.alert = 0
         return
+
 
     def onStart(self):
         Domoticz.Debug("onStart called")
@@ -63,9 +85,11 @@ class BasePlugin:
             Domoticz.Device(Name="UPS Status Mode", Unit=1, TypeName="Alert", Used=1).Create()
             Devices[1].Update(nValue=0, sValue="") # Grey icon to reflect not yet polled
 
+
     def onStop(self):
         Domoticz.Debug("onStop called")
         Domoticz.Debugging(0)
+
 
     def onHeartbeat(self):
         now = datetime.now()
@@ -75,7 +99,7 @@ class BasePlugin:
             try:
                 nut = telnetlib.Telnet(host=Parameters["Address"], port=Parameters["Port"], timeout=5)
             except Exception as errorcode:
-                Domoticz.Error("Cannot communicate with NAT Server at {}:{} due to {}".format(
+                Domoticz.Error("Cannot communicate with NUT Server at {}:{} due to {}".format(
                     Parameters["Address"], Parameters["Port"], errorcode.args))
             else:
                 nut.write(bytes("LIST VAR {}\n".format(Parameters["Mode1"]), "utf-8"))
@@ -92,23 +116,39 @@ class BasePlugin:
                 else:
                     Domoticz.Error("Error reading UPS variables: {}".format(response.replace("\n", "")))
                 nut.close()
+                self.statusflags = []  # reset status flags list
+                self.alert = 0  # reset alarm level to 0
                 for key in self.variables:
                     Domoticz.Debug("Variable {} = {}".format(self.variables[key][0], self.variables[key][2]))
                     if self.variables[key][2]:  # skip any variables not reported by the NUT server
                         self.UpdateDevice(key)  # create/update the relevant child devices
 
+
     def UpdateDevice(self, key):
+
         # inner function to perform the actual update
         def DoUpdate(Unit, nValue, sValue):
             try:
                 Devices[Unit].Update(nValue=nValue, sValue=sValue)
             except Exception as errorcode:
                 Domoticz.Error("Failed to update device unit {} due to {}".format(Unit, errorcode.args))
+
         # Make sure that the Domoticz device still exists (they can be deleted) before updating it
         if self.variables[key][3] in Devices:
             if key == "ups.status":
-                nvalue = 1 if "OL" in self.variables[key][2] else 4
-                svalue = "On Line" if "OL" in self.variables[key][2] else "Backup Power"
+                # iterate over the codes in the status string
+                for word in self.variables[key][2].split(" "):
+                    try:
+                        temp = self.status[word]
+                    except KeyError:
+                        # code not in our list of possible statuses... do not "translate" but report as is
+                        self.statusflags.append(str(word))
+                    else:
+                        # code is known so translated and alert level updated accordingly
+                        self.statusflags.append(self.status[word][0])
+                        self.alert = max(self.alert, self.status[word][1])
+                nvalue = self.alert
+                svalue = " ".join(self.statusflags)
                 if Devices[self.variables[key][3]].sValue != svalue:
                     DoUpdate(self.variables[key][3], nvalue, svalue)
             else:
@@ -116,11 +156,11 @@ class BasePlugin:
                 svalue = str(self.variables[key][2])
                 DoUpdate(self.variables[key][3], nvalue, svalue)
         elif key != "ups.status":
-            #  create device and make a recursive call to update it
             Domoticz.Device(Name=self.variables[key][0], Unit=self.variables[key][3], TypeName="Custom",
                             Image= 17, Options={"Custom": "1;{}".format(self.variables[key][1])},
                             Used=self.variables[key][4]).Create()
-            #self.UpdateDevice(key) this no longer works with domoticz 3.8035... Update upon next poll
+            # Update upon next poll (recursive call to update device broken in some domoticz versions)
+
 
 global _plugin
 _plugin = BasePlugin()
