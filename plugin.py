@@ -10,10 +10,12 @@ Version:    0.0.1: alpha
             0.1.2: code change to avoid bug that appeared with domoticz version 3.8035
                     (devices no longer can be created and updated in the same pass
             0.1.3: code cleanup
-            0.2.0: added a more comprehensive list of NUT status variables. Thanks to domoticz forum use @ycahome
+            0.2.0: added a more comprehensive list of NUT status variables. Thanks to domoticz forum user @ycahome
+            0.2.1: in case of communication error or invalid data received, stop updating devices (thanks
+                    to domoticz forum user @hamster) and mark the status device as "timed out" to display in red in GUI
 """
 """
-<plugin key="NUT_UPS" name="UPS Monitor" author="logread" version="0.2.0" wikilink="http://www.domoticz.com/wiki/plugins/NUT_UPS.html" externallink="http://networkupstools.org/">
+<plugin key="NUT_UPS" name="UPS Monitor" author="logread" version="0.2.1" wikilink="http://www.domoticz.com/wiki/plugins/NUT_UPS.html" externallink="http://networkupstools.org/">
     <params>
         <param field="Address" label="UPS NUT Server IP Address" width="200px" required="true" default="127.0.0.1"/>
         <param field="Port" label="Port" width="40px" required="true" default="3493"/>
@@ -36,7 +38,9 @@ class BasePlugin:
 
     def __init__(self):
         self.debug = False
-        self.error = False
+        self.error = True
+        self.timeoutversion = False
+        self.timeout = False
         self.nextpoll = datetime.now()
         self.pollinterval = 60  #Time in seconds between two polls
         self.variables = {
@@ -50,7 +54,7 @@ class BasePlugin:
             "input.frequency":  ["UPS AC Frequency",   "Hz", None,  7, 0]
         }
         self.status = {
-            #code (display, alarm level)
+            #code       (display,           alarm level)
             "OL":       ("ONLINE",          1), # On line (mains is present)
             "OB":       ("ONBATTERY",       4), # On battery (mains is not present)
             "LB":       ("LOWBATTERY",      4), # Low battery
@@ -79,12 +83,18 @@ class BasePlugin:
             DumpConfigToLog()
         else:
             Domoticz.Debugging(0)
-
         # create the mandatory child device if it does not yet exist
         if 1 not in Devices:
             Domoticz.Device(Name="UPS Status Mode", Unit=1, TypeName="Alert", Used=1).Create()
             Devices[1].Update(nValue=0, sValue="") # Grey icon to reflect not yet polled
-
+        # check if our version of domoticz supports the "TimedOut" device attribute (I cannot remember which version of
+        # domoticz has this implemented, so best is to check if supported by "trial and error" method)
+        try:
+            temp = Devices[1].TimedOut
+        except AttributeError:
+            self.timeoutversion = False
+        else:
+            self.timeoutversion = True
 
     def onStop(self):
         Domoticz.Debug("onStop called")
@@ -101,6 +111,8 @@ class BasePlugin:
             except Exception as errorcode:
                 Domoticz.Error("Cannot communicate with NUT Server at {}:{} due to {}".format(
                     Parameters["Address"], Parameters["Port"], errorcode.args))
+                self.error = True
+                self.UpdateDevice("ups.status")  # we flag the error to the status device
             else:
                 nut.write(bytes("LIST VAR {}\n".format(Parameters["Mode1"]), "utf-8"))
                 response = nut.read_until(b"\n").decode()
@@ -113,8 +125,10 @@ class BasePlugin:
                         data = current[offset:].split('"')[1]
                         if key in self.variables:
                             self.variables[key][2] = data
+                    self.error = False
                 else:
                     Domoticz.Error("Error reading UPS variables: {}".format(response.replace("\n", "")))
+                    self.error = True
                 nut.close()
                 self.statusflags = []  # reset status flags list
                 self.alert = 0  # reset alarm level to 0
@@ -127,34 +141,49 @@ class BasePlugin:
     def UpdateDevice(self, key):
 
         # inner function to perform the actual update
-        def DoUpdate(Unit, nValue, sValue):
+        def DoUpdate(Unit=0, nValue=0, sValue="", TimedOut=0):
             try:
-                Devices[Unit].Update(nValue=nValue, sValue=sValue)
+                if self.timeoutversion:  # Device attribute TimeOut exists in the host domoticz version or not
+                    Devices[Unit].Update(nValue=nValue, sValue=sValue, TimedOut=TimedOut)
+                else:
+                    Devices[Unit].Update(nValue=nValue, sValue=sValue)
             except Exception as errorcode:
                 Domoticz.Error("Failed to update device unit {} due to {}".format(Unit, errorcode.args))
 
         # Make sure that the Domoticz device still exists (they can be deleted) before updating it
         if self.variables[key][3] in Devices:
             if key == "ups.status":
-                # iterate over the codes in the status string
-                for word in self.variables[key][2].split(" "):
-                    try:
-                        temp = self.status[word]
-                    except KeyError:
-                        # code not in our list of possible statuses... do not "translate" but report as is
-                        self.statusflags.append(str(word))
-                    else:
-                        # code is known so translated and alert level updated accordingly
-                        self.statusflags.append(self.status[word][0])
-                        self.alert = max(self.alert, self.status[word][1])
-                nvalue = self.alert
-                svalue = " ".join(self.statusflags)
-                if Devices[self.variables[key][3]].sValue != svalue:
-                    DoUpdate(self.variables[key][3], nvalue, svalue)
+                if self.error:
+                    nvalue = 0
+                    svalue = "COMMUNICATION ERROR"
+                    timedout = True
+                else:
+                    # iterate over the codes in the status string
+                    for word in self.variables[key][2].split(" "):
+                        try:
+                            temp = self.status[word]
+                        except KeyError:
+                            # code not in our list of possible statuses... do not "translate" but report as is
+                            self.statusflags.append(str(word))
+                        else:
+                            # code is known so translated and alert level updated accordingly
+                            self.statusflags.append(self.status[word][0])
+                            self.alert = max(self.alert, self.status[word][1])
+                    nvalue = self.alert
+                    svalue = " ".join(self.statusflags)
+                    timedout = False
+                if timedout != self.timeout:
+                    self.timeout = timedout
+                    timedoutchange = True
+                else:
+                    timedoutchange = False
+                if Devices[self.variables[key][3]].sValue != svalue or timedoutchange:
+                    DoUpdate(self.variables[key][3], nvalue, svalue, timedout)
             else:
-                nvalue = 0
-                svalue = str(self.variables[key][2])
-                DoUpdate(self.variables[key][3], nvalue, svalue)
+                if not self.error:
+                    nvalue = 0
+                    svalue = str(self.variables[key][2])
+                    DoUpdate(self.variables[key][3], nvalue, svalue)
         elif key != "ups.status":
             Domoticz.Device(Name=self.variables[key][0], Unit=self.variables[key][3], TypeName="Custom",
                             Image= 17, Options={"Custom": "1;{}".format(self.variables[key][1])},
