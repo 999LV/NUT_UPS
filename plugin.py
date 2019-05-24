@@ -14,9 +14,10 @@ Version:    0.0.1: alpha
             0.2.1: in case of communication error or invalid data received, stop updating devices (thanks
                     to domoticz forum user @hamster) and mark the status device as "timed out" to display in red in GUI
             0.2.2: added authentication option (thanks to domoticz forum user @copernicnic)
+            0.2.3: fixed incorrect indent
 """
 """
-<plugin key="NUT_UPS" name="UPS Monitor" author="logread" version="0.2.1" wikilink="http://www.domoticz.com/wiki/plugins/NUT_UPS.html" externallink="http://networkupstools.org/">
+<plugin key="NUT_UPS" name="UPS Monitor" author="logread" version="0.2.3" wikilink="http://www.domoticz.com/wiki/plugins/NUT_UPS.html" externallink="http://networkupstools.org/">
     <params>
         <param field="Address" label="UPS NUT Server IP Address" width="200px" required="true" default="127.0.0.1"/>
         <param field="Port" label="Port" width="40px" required="true" default="3493"/>
@@ -118,6 +119,7 @@ class BasePlugin:
                 self.error = True
                 self.UpdateDevice("ups.status")  # we flag the error to the status device
             else:
+                # proceed with authentication if parameters are present
                 if Parameters["Username"] != "" and Parameters["Password"] != "":
                     try:
                         nut.write(bytes("USERNAME %s\n" % Parameters["Username"], "utf-8"))
@@ -132,30 +134,32 @@ class BasePlugin:
                         Domoticz.Error("Authentication error: {}".format(errorcode.args))
                         self.error = True
                         self.UpdateDevice("ups.status")  # we flag the error to the status device
-                    else:
-                        nut.write(bytes("LIST VAR {}\n".format(Parameters["Mode1"]), "utf-8"))
-                        response = nut.read_until(b"\n", self.telnettimeout).decode()
-                        if response == "BEGIN LIST VAR {}\n".format(Parameters["Mode1"]):
-                            response = nut.read_until(bytes("END LIST VAR {}\n".format(Parameters["Mode1"]), "utf-8"),
-                                                      self.telnettimeout).decode()
-                            offset = len("VAR {} ".format(Parameters["Mode1"]))
-                            end_offset = 0 - (len("END LIST VAR %s\n" % Parameters["Mode1"]) + 1)
-                            for current in response[:end_offset].split("\n"):
-                                key = str(current[offset:].split('"')[0].replace(" ", ""))
-                                data = current[offset:].split('"')[1]
-                                if key in self.variables:
-                                    self.variables[key][2] = data
-                            self.error = False
-                        else:
-                            Domoticz.Error("Error reading UPS variables: {}".format(response.replace("\n", "")))
-                            self.error = True
                         nut.close()
-                        self.statusflags = []  # reset status flags list
-                        self.alert = 0  # reset alarm level to 0
-                        for key in self.variables:
-                            Domoticz.Debug("Variable {} = {}".format(self.variables[key][0], self.variables[key][2]))
-                            if self.variables[key][2]:  # skip any variables not reported by the NUT server
-                                self.UpdateDevice(key)  # create/update the relevant child devices
+                        return
+                # read NUT variables
+                nut.write(bytes("LIST VAR {}\n".format(Parameters["Mode1"]), "utf-8"))
+                response = nut.read_until(b"\n", self.telnettimeout).decode()
+                if response == "BEGIN LIST VAR {}\n".format(Parameters["Mode1"]):
+                    response = nut.read_until(bytes("END LIST VAR {}\n".format(Parameters["Mode1"]), "utf-8"),
+                                              self.telnettimeout).decode()
+                    offset = len("VAR {} ".format(Parameters["Mode1"]))
+                    end_offset = 0 - (len("END LIST VAR %s\n" % Parameters["Mode1"]) + 1)
+                    for current in response[:end_offset].split("\n"):
+                        key = str(current[offset:].split('"')[0].replace(" ", ""))
+                        data = current[offset:].split('"')[1]
+                        if key in self.variables:
+                            self.variables[key][2] = data
+                    self.error = False
+                else:
+                    Domoticz.Error("Error reading UPS variables: {}".format(response.replace("\n", "")))
+                    self.error = True
+                nut.close()
+                self.statusflags = []  # reset status flags list
+                self.alert = 0  # reset alarm level to 0
+                for key in self.variables:
+                    Domoticz.Debug("Variable {} = {}".format(self.variables[key][0], self.variables[key][2]))
+                    if self.variables[key][2]:  # skip any variables not reported by the NUT server
+                        self.UpdateDevice(key)  # create/update the relevant child devices
 
 
     def UpdateDevice(self, key):
